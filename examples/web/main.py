@@ -1,16 +1,21 @@
+from __future__ import annotations
+
 import json
 import time
 import threading
 
-from flask import Flask, Response, send_file
+from flask import Flask, Response, send_file, request, jsonify
 
 from manim.animation.creation import Create
 from manim.mobject.geometry.arc import Circle
+from manim.constants import UP, RIGHT
 
 from manim_json.json_scene import JSONScene
 
 
 app = Flask(__name__)
+scenes: dict[int, ExampleScene] = {}
+threads: dict[int, threading.Thread] = {}
 
 
 class ExampleScene(JSONScene):
@@ -35,19 +40,13 @@ class ExampleScene(JSONScene):
         self.frame_data = data
 
     def construct(self):
-        circ = Circle()
-        self.play(Create(circ))
+        self.circ = Circle()
+        self.play(Create(self.circ))
         self.render_frame()
+        self.stop()
     
     def render_frame(self):
         self.wait(1 / self.camera.frame_rate)
-
-    def tear_down(self):
-        self.active = False
-    
-    def updater(self, dt):
-        if self.stopped:
-            raise StopIteration
     
     def stop(self):
         self.stopped = True
@@ -57,32 +56,57 @@ class ExampleScene(JSONScene):
         super().update_to_time(t)
         time.sleep(max(0, 1 / self.camera.frame_rate - time.time() + start_time))
     
+    def move_circle(self, x: float, y: float):
+        self.circ.move_to(x * RIGHT + y * UP)
+        self.render_frame()
+    
     def __iter__(self):
         return self
     
     def __next__(self):
+        global scenes
         if self.active and not self.stopped:
             while self.frame_data is None and self.active and not self.stopped:
                 time.sleep(0.0)
             if self.stopped or not self.active or self.frame_data is None:
                 raise StopIteration  
             frame_data = self.frame_data
+            frame_data["id"] = id(self)
             self.frame_data = None
             return json.dumps(frame_data)
         raise StopIteration
 
 
-scene: JSONScene | None = None
-
-
 @app.route('/stream', methods=['POST'])
 def stream():
-    global scene
-    if scene is not None:
-        scene.stop()
+    global scenes
     scene = ExampleScene()
-    threading.Thread(target=scene.render).start()
+    threads[id(scene)] = threading.Thread(target=scene.render)
+    threads[id(scene)].start()
+    scenes[id(scene)] = scene
     return Response(scene, mimetype='application/json')
+
+
+@app.route('/close', methods=['POST'])
+def close():
+    global scenes, threads
+    id_ = int(request.json['id'])
+    threads[id_].join()
+    del threads[id_]
+    del scenes[id_]
+    return 'OK'
+
+
+@app.route('/move', methods=['POST'])
+def move():
+    global scenes
+    id_ = int(request.json['id'])
+    x = float(request.json['x'])
+    y = float(request.json['y'])
+    scenes[id_].move_circle(x, y)
+    frame_data = scenes[id_].frame_data
+    scenes[id_].frame_data = None
+    return jsonify(frame_data)
 
 
 @app.route('/', methods=['GET'])
@@ -111,4 +135,4 @@ def mathlikeanim_rs_bg():
 
 
 if __name__ == '__main__':
-    app.run()
+    app.run(port=3000)
